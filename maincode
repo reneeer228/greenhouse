@@ -1,0 +1,383 @@
+import dht
+from machine import Pin, ADC, I2C, PWM
+from utime import sleep, ticks_ms, ticks_diff
+import time
+import urequests
+import ujson
+import network
+from pico_i2c_lcd import I2cLcd
+
+WIFI_SSID = "iphone"
+WIFI_PASSWORD = "password"
+
+BOT_TOKEN = "8122591323:AAEjNCsKjw_H95OVwg8WZpQX-8CRaYmncc0"
+CHAT_ID = "8122591323  
+
+sensor = dht.DHT22(Pin(15))
+
+led = Pin(5, Pin.OUT)
+led2 = Pin(3, Pin.OUT)
+
+light_sensor = ADC(Pin(27))
+
+i2c = I2C(0, sda=Pin(0), scl=Pin(1), freq=400000)
+I2C_ADDR = i2c.scan()[0]
+lcd = I2cLcd(i2c, I2C_ADDR, 2, 16)
+
+led_light = PWM(Pin(2))
+led_light.freq(1000)
+
+servo = PWM(Pin(11))
+servo.freq(50)
+
+motor_pins = [Pin(6, Pin.OUT), Pin(7, Pin.OUT), Pin(8, Pin.OUT), Pin(9, Pin.OUT)]
+
+step_sequence = [
+    [1, 0, 0, 0],
+    [1, 1, 0, 0],
+    [0, 1, 0, 0],
+    [0, 1, 1, 0],
+    [0, 0, 1, 0],
+    [0, 0, 1, 1],
+    [0, 0, 0, 1],
+    [1, 0, 0, 1]
+]
+
+def step_motor(steps, delay=0.002):
+    """Вращает шаговый мотор на заданное количество шагов"""
+    for _ in range(steps):
+        for pattern in step_sequence:
+            for pin, val in zip(motor_pins, pattern):
+                pin.value(val)
+            time.sleep(delay)
+
+
+
+def connect_wifi():
+    """Подключается к WiFi"""
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    
+    if not wlan.isconnected():
+        print('Подключение к WiFi...')
+        wlan.connect(WIFI_SSID, WIFI_PASSWORD)
+        
+        timeout = 10
+        start_time = ticks_ms()
+        while not wlan.isconnected() and ticks_diff(ticks_ms(), start_time) < timeout * 1000:
+            time.sleep(0.5)
+            print('.')
+    
+    if wlan.isconnected():
+        print('WiFi подключен!')
+        print('IP адрес:', wlan.ifconfig()[0])
+        lcd.clear()
+        lcd.putstr("WiFi Connected!")
+        time.sleep(1)
+        return True
+    else:
+        print('Не удалось подключиться к WiFi')
+        lcd.clear()
+        lcd.putstr("WiFi Error!")
+        return False
+
+def send_telegram_message(message, chat_id=None):
+    """Отправляет сообщение в Telegram"""
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        target_chat_id = chat_id or CHAT_ID
+        
+        payload = {
+            "chat_id": target_chat_id,
+            "text": message,
+            "parse_mode": "HTML"
+        }
+        
+        headers = {
+            "Content-Type": "application/json"
+        }
+        
+        response = urequests.post(url, data=ujson.dumps(payload), headers=headers)
+        
+        if response.status_code == 200:
+            print("Сообщение отправлено в Telegram")
+        else:
+            print(f"Ошибка отправки: {response.status_code}")
+            print(response.text)
+        
+        response.close()
+        return True
+        
+    except Exception as e:
+        print(f"Ошибка отправки в Telegram: {e}")
+        return False
+
+def get_telegram_updates(offset=0):
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+        params = f"?offset={offset}&timeout=0"
+        
+        response = urequests.get(url + params)
+        
+        if response.status_code == 200:
+            data = ujson.loads(response.text)
+            response.close()
+            
+            if data['ok'] and data['result']:
+                return data['result']
+        
+        response.close()
+        return []
+        
+    except Exception as e:
+        print(f"Ошибка получения обновлений: {e}")
+        return []
+
+def process_command(text, chat_id):
+    """Обрабатывает команды из Telegram"""
+    text = text.lower().strip()
+    
+    if text == '/start' or text == 'start':
+        send_telegram_message(
+            "<b>Бот Raspberry Pi Pico</b>\n\n"
+            "<b>Команды:</b>\n"
+            "/status - Показать показания датчиков\n"
+            "/motor_on - Включить мотор (512 шагов)\n"
+            "/motor_off - Выключить мотор\n"
+            "/motor_100 - Мотор на 100 шагов\n"
+            "/motor_500 - Мотор на 500 шагов\n"
+            "/motor_1000 - Мотор на 1000 шагов\n"
+            "/servo_test - Тест сервопривода\n"
+            "/help - Показать справку",
+            chat_id
+        )
+    
+    elif text == '/status' or text == 'status':
+        try:
+            sensor.measure()
+            temp = sensor.temperature()
+            hum = sensor.humidity()
+            value = light_sensor.read_u16()
+            light_percent = (value / 65535) * 100
+            
+            message = (
+                f"<b>Текущие показатели:</b>\n\n"
+                f"Температура: <b>{temp:.1f}°C</b>\n"
+                f"Влажность: <b>{hum:.1f}%</b>\n"
+                f"Освещённость: <b>{light_percent:.1f}%</b>\n\n"
+                f"LED 1: {'ВКЛ' if temp > 20 else 'ВЫКЛ'}\n"
+                f"LED 2: {'ВКЛ' if hum > 35 else 'ВЫКЛ'}\n"
+                f"Подсветка: {'ВКЛ' if light_percent < 28 else 'ВЫКЛ'}"
+            )
+            send_telegram_message(message, chat_id)
+        except Exception as e:
+            send_telegram_message(f"Ошибка чтения датчиков: {e}", chat_id)
+    
+    elif text == '/motor_on' or text == 'motor_on':
+        send_telegram_message("Запускаю шаговый мотор (512 шагов)...", chat_id)
+        step_motor(512)
+        send_telegram_message("Мотор завершил работу!", chat_id)
+    
+    elif text == '/motor_off' or text == 'motor_off':
+        send_telegram_message("Останавливаю мотор...", chat_id)
+        # Остановка - все пины в 0
+        for pin in motor_pins:
+            pin.value(0)
+        send_telegram_message("Мотор остановлен!", chat_id)
+    
+    elif text == '/motor_100' or text == 'motor_100':
+        send_telegram_message("Запускаю мотор на 100 шагов...", chat_id)
+        step_motor(100)
+        send_telegram_message("Готово!", chat_id)
+    
+    elif text == '/motor_500' or text == 'motor_500':
+        send_telegram_message("Запускаю мотор на 500 шагов...", chat_id)
+        step_motor(500)
+        send_telegram_message("Готово!", chat_id)
+    
+    elif text == '/motor_1000' or text == 'motor_1000':
+        send_telegram_message("Запускаю мотор на 1000 шагов...", chat_id)
+        step_motor(1000)
+        send_telegram_message("Готово!", chat_id)
+    
+    elif text == '/servo_test' or text == 'servo_test':
+        send_telegram_message("Тест сервопривода...", chat_id)
+        servo.duty_u16(1500)
+        time.sleep(0.5)
+        servo.duty_u16(4900)
+        time.sleep(0.5)
+        servo.duty_u16(8200)
+        time.sleep(0.5)
+        servo.duty_u16(1500)
+        send_telegram_message("Тест завершён!", chat_id)
+    
+    elif text == '/help' or text == 'help':
+        send_telegram_message(
+            " <b>Справка:</b>\n\n"
+            "<b>Команды мотора:</b>\n"
+            "/motor_on - Включить мотор (512 шагов)\n"
+            "/motor_off - Остановить мотор\n"
+            "/motor_100 - 100 шагов\n"
+            "/motor_500 - 500 шагов\n"
+            "/motor_1000 - 1000 шагов\n\n"
+            "<b>Другие команды:</b>\n"
+            "/status - Показания датчиков\n"
+            "/servo_test - Тест сервопривода\n"
+            "/start - Главное меню",
+            chat_id
+        )
+    
+    else:
+        send_telegram_message(
+            f" Неизвестная команда: {text}\n"
+            f"Напишите /help для справки",
+            chat_id
+        )
+
+
+last_telegram_send = 0
+TELEGRAM_SEND_INTERVAL = 60  
+
+def send_data_to_telegram(temp, hum, light_percent, force=False):
+    global last_telegram_send
+    
+    current_time = ticks_ms()
+    
+    if force or ticks_diff(current_time, last_telegram_send) > TELEGRAM_SEND_INTERVAL * 1000:
+        
+        if light_percent < 28:
+            light_status = "Темно (подсветка ВКЛ)"
+        elif light_percent < 50:
+            light_status = "Нормально"
+        else:
+            light_status = "Ярко"
+        
+            message = (
+            f" <b>Автоматический отчёт</b>\n\n"
+            f" Температура: <b>{temp:.1f}°C</b>\n"
+            f" Влажность: <b>{hum:.1f}%</b>\n"
+            f" Свет: <b>{light_percent:.1f}%</b>\n"
+            f" {light_status}\n\n"
+            f" Время: {time.ticks_ms() // 1000} сек с запуска"
+        )
+        
+        send_telegram_message(message)
+        last_telegram_send = current_time
+
+last_warning_temp = 0
+last_warning_hum = 0
+WARNING_INTERVAL = 300  
+
+def send_warning_if_needed(temp, hum):
+    global last_warning_temp, last_warning_hum
+    
+    current_time = ticks_ms()
+    
+    if temp > 30:
+        if ticks_diff(current_time, last_warning_temp) > WARNING_INTERVAL * 1000:
+            send_telegram_message(
+                f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
+                f"🌡️ Высокая температура: <b>{temp:.1f}°C</b>\n"
+                f"Мотор был активирован!"
+            )
+            last_warning_temp = current_time
+    
+    if hum < 20:
+        if ticks_diff(current_time, last_warning_hum) > WARNING_INTERVAL * 1000:
+            send_telegram_message(
+                f" <b>ВНИМАНИЕ!</b>\n\n"
+                f" Низкая влажность: <b>{hum:.1f}%</b>\n"
+                f"Сервопривод был активирован!"
+            )
+            last_warning_hum = current_time
+
+
+last_update_id = 0
+motor_running = False
+
+print("Запуск программы...")
+lcd.clear()
+lcd.putstr("Starting...")
+
+if connect_wifi():
+    send_telegram_message(
+        "<b>Система запущена!</b>\n\n"
+        "Raspberry Pi Pico готов к работе.\n"
+        "Напишите /start для начала.",
+        force=True
+    )
+
+print("Главный цикл запущен!")
+
+while True:
+    try:
+        value = light_sensor.read_u16()
+        sensor.measure()
+        temp = sensor.temperature()
+        hum = sensor.humidity()
+        
+        light_percent = (value / 65535) * 100
+        
+        print(f"Темп: {temp}°С, Влажн: {hum}%, Свет: {light_percent:.1f}%")
+        
+        led.value(temp > 20)
+        led2.value(hum > 35)
+        
+        if hum < 20 and not motor_running:
+            servo.duty_u16(1500)
+            time.sleep(0.2)
+            servo.duty_u16(4900)
+            time.sleep(0.2)
+            servo.duty_u16(8200)
+            time.sleep(0.2)
+        
+        if temp > 30 and not motor_running:
+            print("Температура высокая! Включаю шаговый мотор...")
+            motor_running = True
+            step_motor(512)
+            motor_running = False
+        
+        lcd.move_to(0, 0)
+        lcd.putstr("Temp:{:.1f}C".format(temp))
+        
+        lcd.move_to(0, 1)
+        if light_percent < 28:
+            status = "Dark"
+            led_light.duty_u16(60000)
+        elif light_percent < 50:
+            status = "Norm"
+            led_light.duty_u16(0)
+        else:
+            status = "Brig"
+            led_light.duty_u16(0)
+        
+        lcd.putstr("H:{:.0f}%  {}".format(hum, status))
+        
+        send_data_to_telegram(temp, hum, light_percent)
+
+        send_warning_if_needed(temp, hum)
+
+        updates = get_telegram_updates(last_update_id)
+        
+        for update in updates:
+            last_update_id = update['update_id'] + 1
+            
+            if 'message' in update:
+                chat_id = update['message']['chat']['id']
+                text = update['message'].get('text', '')
+                
+                print(f" Получена команда от {chat_id}: {text}")
+                
+                process_command(text, chat_id)
+        
+        sleep(1)
+        
+    except Exception as e:
+        print("Ошибка:", e)
+        try:
+            lcd.clear()
+            lcd.putstr("Error!")
+            send_telegram_message(f"Ошибка в работе: {e}")
+        except:
+            pass
+        sleep(5)
