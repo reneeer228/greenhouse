@@ -276,8 +276,8 @@ def send_warning_if_needed(temp, hum):
     if temp > 30:
         if ticks_diff(current_time, last_warning_temp) > WARNING_INTERVAL * 1000:
             send_telegram_message(
-                f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
-                f"🌡️ Высокая температура: <b>{temp:.1f}°C</b>\n"
+                f"<b>ВНИМАНИЕ!</b>\n\n"
+                f"Высокая температура: <b>{temp:.1f}°C</b>\n"
                 f"Мотор был активирован!"
             )
             last_warning_temp = current_time
